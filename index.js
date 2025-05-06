@@ -12,36 +12,37 @@ const port = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// MySQL Connection
-const db = await mysql.createConnection({
+// ✅ MySQL Connection Pool
+const db = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-// CRON: fetch from first backend every hour
+// ✅ CRON: fetch from ESP32 backend every hour
 cron.schedule('0 * * * *', async () => {
   try {
     const res = await axios.get('https://esp32-water-backend.onrender.com/api/water-level');
     const { level } = res.data;
 
     if (typeof level === 'number') {
-      const istDate = new Date(new Date().getTime() + (5.5 * 60 * 60 * 1000));
-      const currentIST = istDate.toISOString().slice(0, 19).replace('T', ' ');
-      await db.execute('INSERT INTO water_levels (level, timestamp) VALUES (?, ?)', [level, currentIST]);
-      console.log(`✅ Auto-logged: ${level} at ${currentIST}`);
+      await db.execute('INSERT INTO water_levels (level) VALUES (?)', [level]);
+      console.log(`✅ Logged automatically: ${level}`);
     }
   } catch (err) {
-    console.error('❌ CRON failed:', err.message);
+    console.error('❌ CRON job error:', err.message);
   }
 });
 
-// API to get chart data with filter
+// ✅ Chart Data API with Timezone Adjustment to IST
 app.get('/api/chart-data', async (req, res) => {
   const { range } = req.query;
 
-  let interval = '1 DAY';
+  let interval = '1 DAY'; // default
   if (range === '7d') interval = '7 DAY';
   else if (range === '1m') interval = '1 MONTH';
   else if (range === '3m') interval = '3 MONTH';
@@ -51,10 +52,11 @@ app.get('/api/chart-data', async (req, res) => {
       `SELECT level, timestamp FROM water_levels WHERE timestamp >= NOW() - INTERVAL ${interval} ORDER BY timestamp ASC`
     );
 
-    // Format timestamp as "DD/MM/YYYY HH:mm:ss"
+    // Convert UTC to IST and format
     const data = rows.map(row => {
-      const date = new Date(row.timestamp);
-      const formatted = date.toLocaleString('en-IN', {
+      const utcDate = new Date(row.timestamp);
+      const istDate = new Date(utcDate.getTime() + (5.5 * 60 * 60 * 1000)); // IST offset
+      const formatted = istDate.toLocaleString('en-GB', {
         day: '2-digit',
         month: '2-digit',
         year: 'numeric',
@@ -63,11 +65,9 @@ app.get('/api/chart-data', async (req, res) => {
         second: '2-digit',
         hour12: false,
         timeZone: 'Asia/Kolkata'
-      });
-      return {
-        level: row.level,
-        timestamp: formatted
-      };
+      }).replace(',', '');
+
+      return { level: row.level, timestamp: formatted };
     });
 
     res.json(data);
@@ -76,7 +76,7 @@ app.get('/api/chart-data', async (req, res) => {
   }
 });
 
-// Manual log API
+// ✅ Manual Log API
 app.post('/api/manual-log', async (req, res) => {
   const { level } = req.body;
 
@@ -85,15 +85,14 @@ app.post('/api/manual-log', async (req, res) => {
   }
 
   try {
-    const istDate = new Date(new Date().getTime() + (5.5 * 60 * 60 * 1000));
-    const currentIST = istDate.toISOString().slice(0, 19).replace('T', ' ');
-    await db.execute('INSERT INTO water_levels (level, timestamp) VALUES (?, ?)', [level, currentIST]);
-    res.json({ message: `✅ Manually inserted level: ${level} at ${currentIST}` });
+    await db.execute('INSERT INTO water_levels (level) VALUES (?)', [level]);
+    res.json({ message: `✅ Manually inserted level: ${level}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// ✅ Start Server
 app.listen(port, () => {
   console.log(`🚀 Logger server running on port ${port}`);
 });
